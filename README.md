@@ -43,3 +43,27 @@ For documenting Python code, please adhere to the Totto-style docstring guidelin
 ## 📄 License
 
 [// License Information]
+
+
+<html>
+<head>
+    <title>Playable Videos</title>
+</head>
+<body>
+
+<h1>Model in Action</h1>
+
+<h2>Living Room</h2>
+<video controls width="300">
+    <source src="videos/living_room.mp4" type="video/mp4">
+    Your browser does not support the video tag.
+</video>
+
+<h2>Office</h2>
+<video controls width="300">
+    <source src="videos/office.mp4" type="video/mp4">
+    Your browser does not support the video tag.
+</video>
+
+</body>
+</html>
