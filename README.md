@@ -9,7 +9,7 @@ DeepDINO is a supervised depth estimation model that leverages the DINOv2 backbo
 - [DeepDINO-DepthEstimation 🦖](#deepdino-depthestimation-)
   - [🌐 Table of Contents](#-table-of-contents)
   - [💻 Installation](#-installation)
-  - [🚀 Usage](#-usage)
+  - [🚀 Examples](#-examples)
   - [🤝 Contributing](#-contributing)
     - [Docstring Guidelines](#docstring-guidelines)
   - [📄 License](#-license)
@@ -24,8 +24,12 @@ pip install -r requirements.txt
 pip install git+https://github.com/facebookresearch/dinov2
 ```
 
-## 🚀 Usage 
+## 🚀 Examples
 
+<!-- Display GIFs found in videos/-->
+
+Live videos of the model in action can be found in the [videos](videos/) folder. These are streams of the model running on a NVIDIA 3060 ti GPU on 720x1280 resolution.
+| ![Living room](videos/living_room.gif) | ![Office](videos/office.gif) |
 
 
 ## 🤝 Contributing 
