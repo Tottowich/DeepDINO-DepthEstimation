@@ -66,7 +66,7 @@ class BaseDataLoader:
         If True, provides detailed logging.
     """
     
-    def __init__(self, sources: List[str], imgsz: Union[int, Tuple[int, int]], device:torch.device=torch.device("cuda:0"),verbose: bool = False):
+    def __init__(self, sources: List[str], imgsz: Union[int, Tuple[int, int]], device:torch.device=torch.device("cuda:0"), verbose: bool = False):
         """
         Initialize BaseDataLoader object with specific parameters.
         
@@ -193,7 +193,7 @@ class DataLoaderVideo(BaseDataLoader):
     This class is designed for video stream data loading.
     """
     def __init__(self, sources: str = 'file.streams', imgsz: Union[int, Tuple[int, int]] = 640, 
-                 vid_stride: int = 1, verbose: bool = False):
+                 vid_stride: int = 1, **kwargs):
         """
         Initialize DataLoaderVideo object with specific parameters.
         
@@ -210,7 +210,7 @@ class DataLoaderVideo(BaseDataLoader):
         """
         
         # Initialize parent class
-        super().__init__(sources=[sources], imgsz=imgsz, verbose=verbose)
+        super().__init__(sources=[sources], imgsz=imgsz, **kwargs)
         
         # Additional LoadStreams-specific initializations
         self.init_attributes(vid_stride)
