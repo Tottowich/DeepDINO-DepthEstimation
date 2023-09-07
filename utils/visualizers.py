@@ -118,6 +118,45 @@ class Visualizer:
         cv2.imshow(self.image_name, img0)
         cv2.waitKey(1)
 
+    @classmethod
+    def put_text(cls, img: np.ndarray, text: str, position: tuple, color: tuple = (255, 255, 255), font_scale: float = 1.0, thickness: int = 2):
+        """
+        Put text on an image.
+        
+        Parameters:
+        -----------
+        img : np.ndarray
+            The image to put text on.
+        text : str
+            The text to put on the image.
+        position : tuple
+            The position of the text on the image. (x, y)
+        color : tuple, default=(255, 255, 255)
+            The color of the text.
+        font_scale : float, default=1.0
+            The font scale of the text.
+        thickness : int, default=2
+            The thickness of the text.
+        """
+        cv2.putText(img, text, position, cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
+    @classmethod
+    def put_point(cls, img: np.ndarray, point: tuple, color: tuple = (255, 255, 255), radius: int = 5):
+        """
+        Put a point on an image.
+        
+        Parameters:
+        -----------
+        img : np.ndarray
+            The image to put the point on.
+        point : tuple
+            The position of the point on the image.
+        color : tuple, default=(255, 255, 255)
+            The color of the point.
+        radius : int, default=5
+            The radius of the point.
+        """
+        cv2.circle(img, point, radius, color, -1)
+
 def grid_images(images: List[np.ndarray], nrows: int) -> np.ndarray:
     """
     Create a grid of images with nrows number of images per row.

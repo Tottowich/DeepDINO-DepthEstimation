@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import transforms as T
 from dinov2.eval.depth.models import build_depther
+from mmcv.runner import load_checkpoint
 
 import math
 import itertools
@@ -67,12 +68,16 @@ class DinoV2Loader:
         self.head_type = head_type
         self.head_dataset = head_dataset
 
+        self.head_checkpoint_url: Optional[str] = None
+        self.head_config_url: Optional[str] = None
+
     def load_model(self, device=torch.device("cuda:0")) -> nn.Module:
 
         self.backbone_model = self._load_backbone().to(device)
-        self.model = self._load_model().to(device)
-        if hasattr(self.backbone_model, "patch_size"):
-            self.model.backbone.register_forward_pre_hook(lambda _, x: CenterPadding(self.backbone_model.patch_size)(x[0]))
+        self.model = self._load_model()
+        load_checkpoint(self.model, self.head_checkpoint_url, map_location="cpu")
+        self.model.eval()
+        self.model.to(device)
         return self.model
         
     def _load_backbone(self) -> nn.Module:
@@ -116,6 +121,9 @@ class DinoV2Loader:
             return_class_token=cfg.model.backbone.output_cls_token,
             norm=cfg.model.backbone.final_norm
         )
+        if hasattr(self.backbone_model, "patch_size"):
+            depther.backbone.register_forward_pre_hook(lambda _, x: CenterPadding(self.backbone_model.patch_size)(x[0]))
+
         return depther
 
     def _load_config_from_url(self) -> str:
@@ -130,8 +138,9 @@ class DinoV2Loader:
         # Define URL
         DINOV2_BASE_URL = "https://dl.fbaipublicfiles.com/dinov2"
         backbone_name = f"dinov2_{self.backbone_arch}"
-        head_config_url = f"{DINOV2_BASE_URL}/{backbone_name}/{backbone_name}_{self.head_dataset}_{self.head_type}_config.py"
-        
+        self.head_config_url = f"{DINOV2_BASE_URL}/{backbone_name}/{backbone_name}_{self.head_dataset}_{self.head_type}_config.py"
+        self.head_checkpoint_url = f"{DINOV2_BASE_URL}/{backbone_name}/{backbone_name}_{self.head_dataset}_{self.head_type}_head.pth"
+
         # Fetch content
-        with urllib.request.urlopen(head_config_url) as f:
+        with urllib.request.urlopen(self.head_config_url) as f:
             return f.read().decode()

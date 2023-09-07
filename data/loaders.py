@@ -44,32 +44,20 @@ def get_best_youtube_url(url: str) -> Optional[str]:
         if f['vcodec'] != 'none' and f['acodec'] == 'none' and f['ext'] == 'mp4':
             return f.get('url', None)
 
-
-class LoadStreams:
+class BaseDataLoader:
     """
-    Load video streams for predictions. Supports various video sources including files, RTSP, RTMP, HTTP streams, 
-    and YouTube links.
+    Base class for data loading. 
     
     Attributes:
     -----------
     mode : str
-        Operating mode, set to 'stream'.
-    imgsz : Tuple[int, int]
-        Shape to resize the image to.
-    vid_stride : int
-        Video frame-rate stride.
+        Operating mode, can be 'stream', 'batch', etc.
     sources : List[str]
-        List of source video links or paths.
-    LB : Type[LetterBox]
-        A LetterBox object for resizing and padding.
+        List of source links or paths.
     imgs : List[Union[np.ndarray, None]]
-        List of images from video sources.
-    fps : List[int]
-        List of frames per second for each video source.
-    frames : List[Union[int, float]]
-        List of total frames for each video source.
+        Image buffer from data sources (BGR).
     threads : List[Union[Thread, None]]
-        List of threads for each video source.
+        List of threads for each data source.
     bs : int
         Batch size, determined by the number of sources.
     count : int
@@ -78,61 +66,255 @@ class LoadStreams:
         If True, provides detailed logging.
     """
     
+    def __init__(self, sources: List[str], imgsz: Union[int, Tuple[int, int]], device:torch.device=torch.device("cuda:0"),verbose: bool = False):
+        """
+        Initialize BaseDataLoader object with specific parameters.
+        
+        Parameters:
+        -----------
+        sources : List[str]
+            List of source file paths or URLs.
+        verbose : bool, default=False
+            If True, provides detailed logging.
+        """
+        self.mode = None  # To be defined by subclass
+        self.sources = sources
+        self.imgs = [None] * len(sources)
+        self.threads = [None] * len(sources)
+        self.bs = len(sources)
+        self.count = -1
+        self.verbose = verbose
+        self.transform = lambda x: x  # To be defined by subclass
+        self.imgsz = (imgsz, imgsz) if isinstance(imgsz, int) else imgsz
+        self.device = device
+
+    def _preprocess(self, img0) -> torch.Tensor:
+        """
+        Preprocesses images or frames.
+
+        Parameters:
+        -----------
+        img0 : List[np.ndarray]
+            List of images or frames to preprocess.
+        
+        Returns:
+        --------
+        torch.Tensor
+            Preprocessed images or frames (BCHW). Batch size is determined by the number of sources.
+        """
+        img = [self.LB(image=x) for x in img0]  # Apply LetterBox transformation
+        img = np.stack(img)
+        img = img[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW
+        img = np.ascontiguousarray(img).astype(np.float32)
+        img = torch.from_numpy(img)/255.0
+        img = self.transform(img).to(self.device)
+        return img
+
+        
+    def update(self, i: int, cap: Union[None, cv2.VideoCapture], stream: str):
+        """
+        Abstract method for updating data stream in a thread.
+        
+        Parameters:
+        -----------
+        i : int
+            Index of the stream to update.
+        cap : Union[None, cv2.VideoCapture]
+            Capture object for the stream (if applicable).
+        stream : str
+            Source URL or path of the data stream.
+        """
+        raise NotImplementedError("This method must be overridden by the subclass.")
+        
+    def __iter__(self):
+        """
+        Returns iterator for data feed.
+        
+        Returns:
+        --------
+        self
+        """
+        self.count = -1
+        return self
+
+    def __next__(self):
+        """
+        Abstract method for obtaining the next batch of data.
+        
+        Returns:
+        --------
+        Tuple
+            Defined by subclass.
+        """
+        self._check_threads()
+        img0 = self.imgs.copy()
+        img = self._preprocess(img0)
+        return self.sources, img0, img, ''
+
+        
+    def __len__(self) -> int:
+        """
+        Returns the length of the sources object.
+        
+        Returns:
+        --------
+        int
+            The length of the sources object.
+        """
+        return len(self.sources)
+    
+class DataLoaderVideo(BaseDataLoader):
+    """
+    DataLoader for video streams.
+    
+    Inherits from:
+    --------------
+    BaseDataLoader
+    
+    Methods:
+    --------
+    __init__ : Initialize DataLoaderVideo object with specific parameters.
+    init_attributes : Initialize attributes specific to video streams.
+    init_transforms : Initialize image transformations.
+    init_streams : Initialize video streams.
+    init_single_stream : Initialize a single video stream.
+    update : Read stream frames in daemon thread.
+    _check_threads : Check if threads are alive and re-open unresponsive streams.
+    
+    Attributes:
+    -----------
+    mode : str
+        Operating mode, set to 'stream'.
+    vid_stride : int
+        Frame stride for video streams.
+    
+    Note:
+    -----
+    This class is designed for video stream data loading.
+    """
     def __init__(self, sources: str = 'file.streams', imgsz: Union[int, Tuple[int, int]] = 640, 
                  vid_stride: int = 1, verbose: bool = False):
         """
-        Initialize LoadStreams object with specific parameters.
+        Initialize DataLoaderVideo object with specific parameters.
         
         Parameters:
         -----------
         sources : str, default='file.streams'
-            The source file path or single source URL.
-        imgsz : Union[int, Tuple[int, int]], default=(640, 640)
-            Shape to resize image to.
+            Source file paths or URLs for video streams.
+        imgsz : Union[int, Tuple[int, int]], default=640
+            Image size for video frames.
         vid_stride : int, default=1
-            Video frame-rate stride.
+            Frame stride for video streams.
         verbose : bool, default=False
             If True, provides detailed logging.
         """
-        torch.backends.cudnn.benchmark = True  # For faster fixed-size inference
+        
+        # Initialize parent class
+        super().__init__(sources=[sources], imgsz=imgsz, verbose=verbose)
+        
+        # Additional LoadStreams-specific initializations
+        self.init_attributes(vid_stride)
+        self.init_transforms()
+        self.init_streams()
+
+    def init_attributes(self, vid_stride):
+        """
+        Initialize attributes specific to video streams.
+        
+        Parameters:
+        -----------
+        vid_stride : int
+            Frame stride for video streams.
+        
+        Note:
+        -----
+        Sets the mode to 'stream' and initializes CUDA benchmarking.
+        """
         self.mode = 'stream'
-        self.imgsz = (imgsz, imgsz) if isinstance(imgsz, int) else imgsz
         self.vid_stride = vid_stride
-        self.verbose = verbose
-        sources = Path(sources).read_text().rsplit() if os.path.isfile(sources) else [sources]
+        torch.backends.cudnn.benchmark = True  # For faster fixed-size inference
+
+    def init_transforms(self)->None:
+        """
+        Initialize image transformations.
+        
+        Note:
+        -----
+        Initializes the LetterBox transformation and normalization.
+        """
         self.LB = LetterBox(self.imgsz)
         self.transform = T.Compose([
-            # lambda x: 255.0 * x[:3], # Discard alpha component and scale by 255
+            lambda x: 255.0 * x[:3], # Discard alpha component and scale by 255
             T.Normalize(
-                mean=(0.485, 0.456, 0.406),
-                std=(0.229, 0.224, 0.225),
+                mean=(123.675, 116.28, 103.53),
+                std=(58.395, 57.12, 57.375),
             ),
         ])
-        n = len(sources)
-        self.sources = [str(x) for x in sources]  # Clean source names for later use
-        self.imgs, self.fps, self.frames, self.threads = [None] * n, [0] * n, [0] * n, [None] * n
-        # Initialize video streams and start reading frames
-        for i, s in enumerate(sources):
-            if urlparse(s).hostname in ('www.youtube.com', 'youtube.com', 'youtu.be'):  # YouTube source
-                s = get_best_youtube_url(s)
-            s = eval(s) if s.isnumeric() else s  # Local webcam if s = '0'
-            cap = cv2.VideoCapture(s)
-            if not cap.isOpened():
-                raise ConnectionError(f'Failed to open {s}')
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            self.frames[i] = max(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), 0) or float('inf')  # Fallback to infinite stream
-            self.fps[i] = max((fps if math.isfinite(fps) else 0) % 100, 0) or 60  # Fallback to 60 FPS
-            success, self.imgs[i] = cap.read()  # Guarantee first frame
-            if not success or self.imgs[i] is None:
-                raise ConnectionError(f'Failed to read images from {s}')
-            self.threads[i] = Thread(target=self.update, args=([i, cap, s]), daemon=True)
-            LOGGER.info(f'Success ✅ ({self.frames[i]} frames of shape {w}x{h} at {self.fps[i]:.2f} FPS)')
-            self.threads[i].start()
-        LOGGER.info('')  # Newline for formatting
-        self.bs = self.__len__()  # Batch size
 
+    def init_streams(self)->None:
+        """
+        Initialize video streams.
+        
+        Note:
+        -----
+        Initializes video streams based on the provided source files or URLs.
+        """
+        sources = Path(self.sources[0]).read_text().rsplit() if os.path.isfile(self.sources[0]) else self.sources
+        self.sources = [str(x) for x in sources]
+        self.imgs, self.fps, self.frames, self.threads = [None] * len(self.sources), [0] * len(self.sources), [0] * len(self.sources), [None] * len(self.sources)
+        
+        for i, s in enumerate(self.sources):
+            cap = self.init_single_stream(i, s)
+            self.threads[i] = Thread(target=self.update, args=([i, cap, s]), daemon=True)
+            self.threads[i].start()
+
+    def init_single_stream(self, i, s)->cv2.VideoCapture:
+        """
+        Initialize a single video stream.
+        
+        Parameters:
+        -----------
+        i : int
+            Index of the stream to initialize.
+        s : str
+            Source URL or path for the video stream.
+        
+        Returns:
+        --------
+        cv2.VideoCapture
+            Initialized video capture object.
+        
+        Raises:
+        -------
+        ConnectionError
+            When the video stream fails to open or read.
+        
+        Note:
+        -----
+        Handles YouTube sources and local webcams.
+        """
+        # YouTube or local webcam handling here
+        if urlparse(s).hostname in ('www.youtube.com', 'youtube.com', 'youtu.be'):  # YouTube source
+            s = get_best_youtube_url(s)
+        s = eval(s) if s.isnumeric() else s  # Local webcam if s = '0'
+
+        # Initialize video stream
+        cap = cv2.VideoCapture(s)
+        if not cap.isOpened():
+            raise ConnectionError(f'Failed to open {s}')
+
+        w, h, fps = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)), cap.get(cv2.CAP_PROP_FPS)
+        self.frames[i] = max(int(cap.get(cv2.CAP_PROP_FRAME_COUNT))//self.vid_stride, 0) or float('inf')  # Fallback to infinite stream
+        self.fps[i] = max((fps if math.isfinite(fps) else 0) % 100, 0) or 60  # Fallback to 60 FPS
+
+        # Read the first frame to ensure the stream is functioning
+        success, self.imgs[i] = cap.read()
+        if not success or self.imgs[i] is None:
+            raise ConnectionError(f'Failed to read images from {s}')
+
+        # Logging
+        LOGGER.info(f'Success ✅ ({self.frames[i]} frames of {w}x{h} at {self.fps[i]:.2f} FPS)')
+        return cap
     def update(self, i: int, cap: cv2.VideoCapture, stream: str):
         """
         Read stream `i` frames in daemon thread.
@@ -145,6 +327,10 @@ class LoadStreams:
             Video capture object for the stream.
         stream : str
             Source URL or path of the video stream.
+        
+        Note:
+        -----
+        Reads frames from the video stream and updates the image buffer (self.imgs).
         """
         n, f = 0, self.frames[i]
         while cap.isOpened() and n < f:
@@ -158,53 +344,15 @@ class LoadStreams:
                     LOGGER.warning('WARNING ⚠️ Video stream unresponsive, please check your IP camera connection.')
                     self.imgs[i] = np.zeros_like(self.imgs[i])
                     cap.open(stream)  # Re-open stream if signal is lost
-
-    def __iter__(self):
+    def _check_threads(self)->None:
         """
-        Returns iterator for image feed and re-opens unresponsive streams.
+        Check if threads are alive and re-open unresponsive streams.
         
-        Returns:
-        --------
-        self
-        """
-        self.count = -1
-        return self # return self.__next__()
-
-    def __next__(self):
-        """
-        Returns source paths, transformed and original images for processing.
-        
-        Returns:
-        --------
-        Tuple[List[str], List[np.ndarray], torch.Tensor, str]
-            Source paths, original images, transformed images, and an empty string.
+        Note:
+        -----
+        Checks if threads are alive and re-opens unresponsive streams.
         """
         self.count += 1
         if not all(x.is_alive() for x in self.threads) or cv2.waitKey(1) == ord('q'):  # q to quit
             cv2.destroyAllWindows()
             raise StopIteration
-
-        img0 = self.imgs.copy()
-        img = [self.LB(image=x) for x in img0]  # Apply LetterBox transformation
-        img = np.stack(img)
-        img = img[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW
-        img = np.ascontiguousarray(img).astype(np.float32)
-        img = torch.from_numpy(img)/255.0
-        # assert img.shape == torch.Size([self.bs, 3, *self.imgsz]), f'Image size {img.shape} not consistent with batch size {self.bs}'
-        img = self.transform(img).cuda()
-        return self.sources, img0, img, ''
-
-    def __len__(self) -> int:
-        """
-        Returns the length of the sources object.
-        
-        Returns:
-        --------
-        int
-            The length of the sources object.
-        """
-        return len(self.sources)
-    
-
-
-       

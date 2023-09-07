@@ -18,9 +18,10 @@ DeepDINO is a supervised depth estimation model that leverages the DINOv2 backbo
 
 Clone the repository and install the necessary requirements:
 ```bash
-git clone https://github.com/yourusername/DeepDINO-DepthEstimation.git
+git clone https://github.com/Tottowich/DeepDINO-DepthEstimation.git
 cd DeepDINO-DepthEstimation
 pip install -r requirements.txt
+pip install git+https://github.com/facebookresearch/dinov2
 ```
 
 ## 🚀 Usage 
