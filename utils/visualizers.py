@@ -103,6 +103,12 @@ class Visualizer:
             cv2.putText(img0, f'FPS: {fps:.2f}', (img0.shape[1] - 100, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         self._last_update_time = current_time
+        
+    def is_alive(self):
+        """
+        Check if the window is still open.
+        """
+        return self._check_window_closed()
 
     def display_image(self, img0: np.ndarray):
         """

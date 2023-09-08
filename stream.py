@@ -47,6 +47,7 @@ if __name__=="__main__":
             # Clear last line
             print("\033[A                             \033[A")
             print(f"Distance: {distance:.2f}m, average: {depth_map.mean():.2f}m, max: {depth_map.max():.2f}m, min: {depth_map.min():.2f}m")
+            
             rendered = render_depth(depth_map.squeeze().cpu())
             pos = (cursor.x, cursor.y)
             vis.put_text(rendered, f"d: {distance:.2f}m", position, color=(0, 0, 255))

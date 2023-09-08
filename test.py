@@ -1,32 +1,71 @@
+from data.loaders import DataLoaderImages
+
+# Load a dataset
+ds = DataLoaderImages("captured_images/")
+
+
+from data.loaders import DataLoaderVideo
+from utils.visualizers import Visualizer, grid_images
+from utils.depth import render_depth, get_distance_at_point
+from utils.logger import LOGGER
+from models.dinov2_loader import *
+import time
+
 import cv2
-import os
+import numpy as np
+class Cursor:
+    x = 0
+    y = 0
+    clicked = False
+    @classmethod
+    def set_cursor_position(cls, event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            cls.x = x
+            cls.y = y
+            cls.clicked = True
 
-def capture_and_save_image(folder_path="captured_images"):
-    # Create the folder if it doesn't exist
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
+    @property
+    def position(self):
+        return (self.x, self.y)
 
-    # Initialize the webcam
-    cap = cv2.VideoCapture(0)
 
-    # Check if the webcam is opened correctly
-    if not cap.isOpened():
-        print("Error: Could not open webcam.")
-        return
+if __name__=="__main__":
+    LOGGER.info(f"Loading model...")
+    loader = DinoV2Loader("small", "dpt", "nyu")
+    depth_model = loader.load_model()
+    LOGGER.info(f"Model loaded")
 
-    # Capture a single frame
-    ret, frame = cap.read()
+    imgsz = (720,1280)
+    # Center Point
+    center = [imgsz[0]//2, imgsz[1]//2]
+    image_loader = DataLoaderImages("captured_images/", imgsz=imgsz)
+    LOGGER.info(f"Streamer loaded")
+    vis = Visualizer('Joint - Images')
+    cursor = Cursor()
+    cv2.setMouseCallback('Joint - Images', cursor.set_cursor_position)
+    def update_image(vis, img0, depth_map):
+        position = cursor.position
+        position = (position[0]-imgsz[1], position[1])
+        distance = get_distance_at_point(depth_map.squeeze(), position[::-1])
+        # Clear last line
+        print("\033[A                             \033[A")
+        print(f"Distance: {distance:.2f}m, average: {depth_map.mean():.2f}m, max: {depth_map.max():.2f}m, min: {depth_map.min():.2f}m")
+        
+        rendered = render_depth(depth_map.squeeze().cpu())
+        pos = (cursor.x, cursor.y)
+        vis.put_text(rendered, f"d: {distance:.2f}m", position, color=(0, 0, 255))
+        vis.put_point(rendered, position, color=(0, 0, 255), radius=5)
+        grid = grid_images([img0, rendered[...,::-1]],2)
+        return vis.update(grid)
 
-    # Save the image if the capture is successful
-    if ret:
-        image_path = os.path.join(folder_path, "captured_image.jpg")
-        cv2.imwrite(image_path, frame)
-        print(f"Image saved at {image_path}")
-    else:
-        print("Error: Could not capture an image.")
+    with torch.inference_mode():
+        for sources, img0, img, _ in image_loader:
+            img0 = img0[0]
+            depth_map = depth_model.whole_inference(img, img_meta=None, rescale=True)
+            if not update_image(vis, img0, depth_map):
+                break
+    while vis.is_alive():
+        update_image(vis, img0, depth_map)
+        time.sleep(0.1)
+        pass
 
-    # Release the webcam
-    cap.release()
-
-# Run the function to capture and save the image
-capture_and_save_image()

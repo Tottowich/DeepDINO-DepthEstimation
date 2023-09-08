@@ -1,15 +1,18 @@
+import glob
 import math
 import os
+from multiprocessing import Pool
 from pathlib import Path
 from threading import Thread
-from typing import Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 from urllib.parse import urlparse
 
 import cv2
+import imageio
 import numpy as np
 import torch
-from torchvision import transforms as T
 import yt_dlp
+from torchvision import transforms as T
 
 from data.pre_process import LetterBox
 from utils.logger import LOGGER
@@ -78,17 +81,19 @@ class BaseDataLoader:
             If True, provides detailed logging.
         """
         self.mode = None  # To be defined by subclass
-        self.sources = sources
+        self.sources = sources if isinstance(sources, list) else [sources]
+        self.meta = None
         self.imgs = [None] * len(sources)
         self.threads = [None] * len(sources)
+        self.frames = [0] * len(sources)
         self.bs = len(sources)
         self.count = -1
         self.verbose = verbose
-        self.transform = lambda x: x  # To be defined by subclass
         self.imgsz = (imgsz, imgsz) if isinstance(imgsz, int) else imgsz
         self.device = device
+        self.init_transforms()
 
-    def _preprocess(self, img0) -> torch.Tensor:
+    def _preprocess(self, img0:Union[list,np.ndarray]) -> torch.Tensor:
         """
         Preprocesses images or frames.
 
@@ -102,30 +107,52 @@ class BaseDataLoader:
         torch.Tensor
             Preprocessed images or frames (BCHW). Batch size is determined by the number of sources.
         """
-        img = [self.LB(image=x) for x in img0]  # Apply LetterBox transformation
-        img = np.stack(img)
+        assert isinstance(img0, list) or isinstance(img0,np.ndarray), f'img0 must be a list or np.ndarray. Got {type(img0)}'
+        img = np.array([self.LB(image=x) for x in img0])  # Apply LetterBox transformation
         img = img[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW
         img = np.ascontiguousarray(img).astype(np.float32)
-        img = torch.from_numpy(img)/255.0
+        img = torch.from_numpy(img)
         img = self.transform(img).to(self.device)
         return img
-
-        
-    def update(self, i: int, cap: Union[None, cv2.VideoCapture], stream: str):
+    
+    def init_transforms(self)->None:
         """
-        Abstract method for updating data stream in a thread.
+        Initialize image transformations.
         
-        Parameters:
-        -----------
-        i : int
-            Index of the stream to update.
-        cap : Union[None, cv2.VideoCapture]
-            Capture object for the stream (if applicable).
-        stream : str
-            Source URL or path of the data stream.
+        Note:
+        -----
+        Initializes the LetterBox transformation and normalization.
         """
-        raise NotImplementedError("This method must be overridden by the subclass.")
+        assert isinstance(self.imgsz, tuple), f'imgsz must be a tuple. Got {type(self.imgsz)}'
+        self.LB = LetterBox(self.imgsz)
+        self.transform = T.Compose([
+            # T.Lambda(lambda x: 255.0 * x[:3]), # Discard alpha component and scale by 255
+            T.Normalize(
+                mean=(123.675, 116.28, 103.53),
+                std=(58.395, 57.12, 57.375),
+            ),
+        ])
+    def pre_hooks(self)->None:
+        """
+        Pre-iteration hooks.
         
+        Note:
+        -----
+        Currently does nothing. To be defined by subclass.
+        """
+        pass
+        
+    def _check_alive(self)->bool:
+        """
+        Abstract method for checking if it should continue iterating.
+        
+        Returns:
+        --------
+        bool
+            True if it should continue iterating, False otherwise.
+        """
+        return self.count < self.frames
+    
     def __iter__(self):
         """
         Returns iterator for data feed.
@@ -134,10 +161,10 @@ class BaseDataLoader:
         --------
         self
         """
-        self.count = -1
+        self.count -= 1
         return self
 
-    def __next__(self):
+    def __next__(self)->Tuple[List[str], List[np.ndarray], torch.Tensor, str]:
         """
         Abstract method for obtaining the next batch of data.
         
@@ -146,11 +173,24 @@ class BaseDataLoader:
         Tuple
             Defined by subclass.
         """
-        self._check_threads()
+        self.count += 1
+
+        self._check_alive()
+        self.pre_hooks()
         img0 = self.imgs.copy()
         img = self._preprocess(img0)
-        return self.sources, img0, img, ''
-
+        return self.sources, img0, img, self.meta
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        """
+        Returns the next batch of data.
+    
+        Returns:
+        --------
+        Tuple
+            Defined by subclass.
+        """
+        return next(self)
+           
         
     def __len__(self) -> int:
         """
@@ -214,7 +254,6 @@ class DataLoaderVideo(BaseDataLoader):
         
         # Additional LoadStreams-specific initializations
         self.init_attributes(vid_stride)
-        self.init_transforms()
         self.init_streams()
 
     def init_attributes(self, vid_stride):
@@ -233,23 +272,6 @@ class DataLoaderVideo(BaseDataLoader):
         self.mode = 'stream'
         self.vid_stride = vid_stride
         torch.backends.cudnn.benchmark = True  # For faster fixed-size inference
-
-    def init_transforms(self)->None:
-        """
-        Initialize image transformations.
-        
-        Note:
-        -----
-        Initializes the LetterBox transformation and normalization.
-        """
-        self.LB = LetterBox(self.imgsz)
-        self.transform = T.Compose([
-            lambda x: 255.0 * x[:3], # Discard alpha component and scale by 255
-            T.Normalize(
-                mean=(123.675, 116.28, 103.53),
-                std=(58.395, 57.12, 57.375),
-            ),
-        ])
 
     def init_streams(self)->None:
         """
@@ -344,7 +366,7 @@ class DataLoaderVideo(BaseDataLoader):
                     LOGGER.warning('WARNING ⚠️ Video stream unresponsive, please check your IP camera connection.')
                     self.imgs[i] = np.zeros_like(self.imgs[i])
                     cap.open(stream)  # Re-open stream if signal is lost
-    def _check_threads(self)->None:
+    def _check_alive(self)->None:
         """
         Check if threads are alive and re-open unresponsive streams.
         
@@ -352,7 +374,122 @@ class DataLoaderVideo(BaseDataLoader):
         -----
         Checks if threads are alive and re-opens unresponsive streams.
         """
-        self.count += 1
         if not all(x.is_alive() for x in self.threads) or cv2.waitKey(1) == ord('q'):  # q to quit
             cv2.destroyAllWindows()
             raise StopIteration
+        
+
+class DataLoaderImages(BaseDataLoader):
+    """
+    DataLoader for image files.
+    
+    Inherits from:
+    --------------
+    BaseDataLoader
+    
+    Methods:
+    --------
+    __init__ : Initialize DataLoaderImages object with specific parameters.
+    init_images : Initialize image files or directory.
+    read_image : Read image using imageio.
+    
+    Attributes:
+    -----------
+    mode : str
+        Operating mode, set to 'batch'.
+    images : np.ndarray
+        Numpy array storing all images.
+    """
+    def __init__(self, sources: List[str], imgsz: Union[int, Tuple[int, int]] = 640, bs:int=1, **kwargs):
+        """
+        Initialize DataLoaderImages object with specific parameters.
+        
+        Parameters:
+        -----------
+        sources : List[str]
+            List of source file paths or directories for image files.
+        imgsz : Union[int, Tuple[int, int]], default=640
+            Image size for frames.
+        verbose : bool, default=False
+            If True, provides detailed logging.
+        """
+        
+        # Initialize parent class
+        super().__init__(sources=sources, imgsz=imgsz, **kwargs)
+        
+        # DataLoaderImages-specific initializations
+        self.mode = 'batch'
+        self.bs = bs
+        self.init_images()
+
+    def read_image(self,filename)->np.ndarray:
+        """
+        Read image using imageio, used for multiprocessing.
+        
+        Parameters:
+        -----------
+        filename : str
+            File path for the image.
+            
+        Returns:
+        --------
+        np.ndarray
+            Image as a numpy array.
+        """
+        return imageio.imread(filename)
+
+    def init_images(self)->None:
+        """
+        Initialize image files.
+        
+        Note:
+        -----
+        Checks if image files exist based on the provided source file paths.
+        """
+        new_sources = []
+        for src in self.sources:
+            if os.path.isdir(src):
+                new_sources.extend(glob.glob(os.path.join(src, '*.[jJ][pP][gG]')))
+                new_sources.extend(glob.glob(os.path.join(src, '*.[pP][nN][gG]')))
+                new_sources.extend(glob.glob(os.path.join(src, '*.[jJ][pP][eE][gG]')))
+            else:
+                new_sources.append(src)
+        
+        self.sources = np.array([str(x) for x in new_sources])
+        
+        # Check if images exist
+        for s in self.sources:
+            if not os.path.exists(s):
+                raise FileNotFoundError(f'Failed to find {s}')
+
+        # Read images into a numpy array
+        with Pool() as p:
+            self.images = p.map(self.read_image, self.sources)
+        self.images = np.stack(self.images, axis=0)
+    def pre_hooks(self) -> None:
+        """
+        Select the next batch of images.
+        """
+        self.imgs = [None] * self.bs
+        indices = np.arange(self.count, self.count+self.bs).astype(int) % len(self.images)
+        self.imgs = self.images[indices]
+
+        self.meta = self.sources[indices.astype(int)]
+        self.count += self.bs
+
+   
+    def _check_alive(self)->None:
+        """
+        Check if threads are alive and re-open unresponsive streams.
+        
+        Note:
+        -----
+        Checks if threads are alive and re-opens unresponsive streams.
+        """
+        if self.count == len(self.sources):
+            raise StopIteration
+if __name__=="__main__":
+    from data.loaders import DataLoaderImages
+
+    # Load a dataset
+    ds = DataLoaderImages("captured_images/")
